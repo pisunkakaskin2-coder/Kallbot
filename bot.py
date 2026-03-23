@@ -32,7 +32,7 @@ waiting_for_site_input: Set[int] = set()
 
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
-        [["Рандом", "По сайту"], ["Настройки"]],
+        [["Рандом", "По сайту"], ["Клиенты", "Настройки"]],
         resize_keyboard=True,
         is_persistent=True,
     )
@@ -106,6 +106,11 @@ def get_all_nicks(lines):
     return list({extract_nick(line) for line in lines if extract_nick(line)})
 
 
+def get_all_clients(lines):
+    clients = {extract_site(line) for line in lines if extract_site(line)}
+    return sorted(clients)
+
+
 def filter_lines_by_site(lines, site_filter: str):
     if not site_filter:
         return lines
@@ -166,6 +171,25 @@ async def send(update, title, lines):
         await update.message.reply_document(bio, caption=title, reply_markup=get_main_keyboard())
 
 
+async def send_clients(update, clients):
+    if not clients:
+        await update.message.reply_text("Клиенты не найдены.", reply_markup=get_main_keyboard())
+        return
+
+    text = "Список клиентов:\n\n" + "\n".join(clients)
+
+    if len(text) < 3500:
+        await update.message.reply_text(text, reply_markup=get_main_keyboard())
+    else:
+        bio = BytesIO("\n".join(clients).encode("utf-8"))
+        bio.name = "clients.txt"
+        await update.message.reply_document(
+            bio,
+            caption=f"Список клиентов: {len(clients)}",
+            reply_markup=get_main_keyboard(),
+        )
+
+
 def get_mode(uid):
     return user_modes.get(uid, SEARCH_MODE_PARTIAL)
 
@@ -183,7 +207,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Бот запущен.\n\n"
         "Отправь nickname для поиска.\n"
         "Кнопка «Рандом» выбирает случайный nickname.\n"
-        "Кнопка «По сайту» задаёт фильтр сайта.\n\n"
+        "Кнопка «По сайту» задаёт фильтр сайта.\n"
+        "Кнопка «Клиенты» показывает список сайтов из базы.\n\n"
         "Формат базы:\n"
         "https://site/register(login):nickname:other\n"
         "или\n"
@@ -212,10 +237,16 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "По сайту":
         await update.message.reply_text(
-            "Введи сайт, например:\ncelka.xyz",
+            "Введи часть сайта, например:\ncelka",
             reply_markup=get_main_keyboard(),
         )
         waiting_for_site_input.add(uid)
+        return
+
+    if text == "Клиенты":
+        lines = read_lines()
+        clients = get_all_clients(lines)
+        await send_clients(update, clients)
         return
 
     if text == "Настройки":
