@@ -28,41 +28,37 @@ SEARCH_MODE_PARTIAL = "partial"
 user_modes: Dict[int, str] = {}
 
 
-def get_main_keyboard() -> ReplyKeyboardMarkup:
+def get_main_keyboard():
     return ReplyKeyboardMarkup(
         [["Рандом", "Настройки"]],
         resize_keyboard=True,
-        is_persistent=True,
     )
 
 
-def get_settings_keyboard() -> ReplyKeyboardMarkup:
+def get_settings_keyboard():
     return ReplyKeyboardMarkup(
         [["Точный поиск", "Частичный поиск"], ["Назад"]],
         resize_keyboard=True,
-        is_persistent=True,
     )
 
 
-def ensure_data_file_exists() -> None:
+def read_lines():
     if not DATA_FILE.exists():
-        raise FileNotFoundError(f"Файл базы не найден: {DATA_FILE}")
+        return []
 
-
-def read_lines() -> List[str]:
-    ensure_data_file_exists()
     with DATA_FILE.open("r", encoding="utf-8", errors="ignore") as f:
-        lines = [line.rstrip("\n\r") for line in f]
-    return [line for line in lines if line.strip()]
+        lines = [line.strip() for line in f if line.strip()]
+
+    return lines
 
 
-def normalize_site(raw_site: str) -> str:
+def normalize_site(raw_site: str):
     s = raw_site.strip()
 
     if s.startswith("https://"):
-        s = s[len("https://"):]
+        s = s[8:]
     elif s.startswith("http://"):
-        s = s[len("http://"):]
+        s = s[7:]
 
     for suffix in ("/register(login)", "/register", "/login"):
         if s.endswith(suffix):
@@ -72,248 +68,147 @@ def normalize_site(raw_site: str) -> str:
     return s.strip("/")
 
 
-def parse_line(line: str) -> Tuple[str, str, str]:
-    """
-    Ожидаемый формат:
-    https://site/register(login):nickname:other
-
-    Разбираем СПРАВА, чтобы https:// не ломал split.
-    """
+def parse_line(line: str):
     parts = line.rsplit(":", 2)
 
-    if len(parts) != 3:
-        return "", "", ""
+    if len(parts) == 3:
+        raw_site, nick, other = parts
+        return normalize_site(raw_site), nick.strip(), other.strip()
 
-    raw_site, nickname, other = parts
-    site = normalize_site(raw_site)
+    if len(parts) == 2:
+        nick, other = parts
+        return "", nick.strip(), other.strip()
 
-    return site.strip(), nickname.strip(), other.strip()
-
-
-def extract_nickname(line: str) -> str:
-    _, nickname, _ = parse_line(line)
-    return nickname
+    return "", "", ""
 
 
-def format_line_for_output(line: str) -> str:
-    site, nickname, other = parse_line(line)
-
-    if site or nickname or other:
-        return f"{site}:{nickname}:{other}"
-
-    return line.strip()
+def extract_nick(line: str):
+    _, nick, _ = parse_line(line)
+    return nick
 
 
-def get_all_nicknames(lines: List[str]) -> List[str]:
-    nicks: Set[str] = set()
+def format_line(line: str):
+    site, nick, other = parse_line(line)
 
-    for line in lines:
-        nick = extract_nickname(line)
-        if nick:
-            nicks.add(nick)
-
-    return list(nicks)
+    if site:
+        return f"{site}:{nick}:{other}"
+    return f"{nick}:{other}"
 
 
-def search_by_nickname(lines: List[str], query: str, mode: str) -> List[str]:
-    q = query.strip().lower()
-    if not q:
-        return []
+def get_all_nicks(lines):
+    return list({extract_nick(line) for line in lines if extract_nick(line)})
 
-    found: List[str] = []
+
+def search(lines, query, mode):
+    q = query.lower()
+    result = []
 
     for line in lines:
-        nick = extract_nickname(line).lower()
+        nick = extract_nick(line).lower()
 
         if mode == SEARCH_MODE_EXACT:
             if nick == q:
-                found.append(format_line_for_output(line))
+                result.append(format_line(line))
         else:
             if q in nick:
-                found.append(format_line_for_output(line))
+                result.append(format_line(line))
 
-    return found
+    return result
 
 
-def get_random_nickname_with_lines(lines: List[str]) -> Optional[Tuple[str, List[str]]]:
-    nicks = get_all_nicknames(lines)
+def get_random(lines):
+    nicks = get_all_nicks(lines)
     if not nicks:
         return None
 
-    chosen_nick = random.choice(nicks)
-    chosen_lines = []
+    nick = random.choice(nicks)
+    found = [format_line(l) for l in lines if extract_nick(l) == nick]
 
-    for line in lines:
-        if extract_nickname(line).lower() == chosen_nick.lower():
-            chosen_lines.append(format_line_for_output(line))
-
-    return chosen_nick, chosen_lines
+    return nick, found
 
 
-async def send_results(update: Update, title: str, lines: List[str]) -> None:
-    if not update.message:
-        return
-
+async def send(update, title, lines):
     if not lines:
-        await update.message.reply_text(
-            "Ничего не найдено.",
-            reply_markup=get_main_keyboard(),
-        )
+        await update.message.reply_text("Ничего не найдено.", reply_markup=get_main_keyboard())
         return
 
     text = title + "\n\n" + "\n".join(lines)
 
-    if len(text) <= 3500:
-        await update.message.reply_text(
-            text,
-            reply_markup=get_main_keyboard(),
-        )
-        return
-
-    payload = "\n".join(lines).encode("utf-8", errors="ignore")
-    bio = BytesIO(payload)
-    bio.name = "results.txt"
-
-    await update.message.reply_document(
-        document=bio,
-        caption=title,
-        reply_markup=get_main_keyboard(),
-    )
+    if len(text) < 3500:
+        await update.message.reply_text(text, reply_markup=get_main_keyboard())
+    else:
+        bio = BytesIO("\n".join(lines).encode())
+        bio.name = "results.txt"
+        await update.message.reply_document(bio, caption=title, reply_markup=get_main_keyboard())
 
 
-def get_user_mode(user_id: int) -> str:
-    return user_modes.get(user_id, SEARCH_MODE_PARTIAL)
+def get_mode(uid):
+    return user_modes.get(uid, SEARCH_MODE_PARTIAL)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_user:
-        return
-
-    mode = get_user_mode(update.effective_user.id)
-    mode_name = "Точный поиск" if mode == SEARCH_MODE_EXACT else "Частичный поиск"
-
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Бот запущен.\n\n"
-        "Отправь nickname для поиска.\n"
-        "Кнопка «Рандом» выбирает случайный nickname.\n\n"
-        "Формат базы:\n"
-        "https://site/register(login):nickname:other\n\n"
-        "В ответе будет:\n"
-        "site:nickname:other\n\n"
-        f"Текущий режим: {mode_name}",
-        reply_markup=get_main_keyboard(),
+        "Отправь nickname для поиска.\n\n"
+        "📌 Список сайтов:\n"
+        "celka.xyz\nnursultan.fun\npulsevisuals.pro\nwexside.ru\n"
+        "deltaclient.site\narbuz.cc\nbritva.ru\ndimasikclient.ru\n"
+        "rockstar.pub\nrich-dlc.tech\ncortexclient.com\nneverlose.tech\n"
+        "monotondlc.space\nquickclient.cc\narcadeclient.xyz\nprivatedlc.xyz\n"
+        "alphadlc.ru\ngr﻿imclient.pl\nakrien.wtf\nnewcode.cc\nenergyclient.su\n"
+        "catlavan.xyz\nmc.fringeworld.ru\n\n"
+        f"Текущий режим: {'Точный' if get_mode(update.effective_user.id)==SEARCH_MODE_EXACT else 'Частичный'}",
+        reply_markup=get_main_keyboard()
     )
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.effective_user:
-        return
-
-    text = (update.message.text or "").strip()
-    user_id = update.effective_user.id
-    mode = get_user_mode(user_id)
-
-    if not text:
-        return
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    uid = update.effective_user.id
+    mode = get_mode(uid)
 
     if text == "Настройки":
-        mode_name = "Точный поиск" if mode == SEARCH_MODE_EXACT else "Частичный поиск"
-        await update.message.reply_text(
-            f"Открыты настройки.\nТекущий режим: {mode_name}",
-            reply_markup=get_settings_keyboard(),
-        )
+        await update.message.reply_text("Настройки:", reply_markup=get_settings_keyboard())
         return
 
     if text == "Назад":
-        mode_name = "Точный поиск" if mode == SEARCH_MODE_EXACT else "Частичный поиск"
-        await update.message.reply_text(
-            f"Возврат в меню.\nТекущий режим: {mode_name}",
-            reply_markup=get_main_keyboard(),
-        )
+        await update.message.reply_text("Меню", reply_markup=get_main_keyboard())
         return
 
     if text == "Точный поиск":
-        user_modes[user_id] = SEARCH_MODE_EXACT
-        await update.message.reply_text(
-            "Режим поиска переключён: Точный поиск",
-            reply_markup=get_settings_keyboard(),
-        )
+        user_modes[uid] = SEARCH_MODE_EXACT
+        await update.message.reply_text("Ок", reply_markup=get_settings_keyboard())
         return
 
     if text == "Частичный поиск":
-        user_modes[user_id] = SEARCH_MODE_PARTIAL
-        await update.message.reply_text(
-            "Режим поиска переключён: Частичный поиск",
-            reply_markup=get_settings_keyboard(),
-        )
+        user_modes[uid] = SEARCH_MODE_PARTIAL
+        await update.message.reply_text("Ок", reply_markup=get_settings_keyboard())
         return
+
+    lines = read_lines()
 
     if text == "Рандом":
-        try:
-            lines = read_lines()
-            result = get_random_nickname_with_lines(lines)
-        except Exception as e:
-            logger.exception("Ошибка при обработке рандома")
-            await update.message.reply_text(
-                f"Ошибка:\n{e}",
-                reply_markup=get_main_keyboard(),
-            )
+        res = get_random(lines)
+        if not res:
+            await update.message.reply_text("База пуста.", reply_markup=get_main_keyboard())
             return
 
-        if not result:
-            await update.message.reply_text(
-                "База пуста.",
-                reply_markup=get_main_keyboard(),
-            )
-            return
-
-        nickname, found_lines = result
-        await send_results(
-            update,
-            title=f"Рандомный nickname: {nickname}\nНайдено строк: {len(found_lines)}",
-            lines=found_lines,
-        )
+        nick, found = res
+        await send(update, f"Рандом: {nick}", found)
         return
 
-    try:
-        lines = read_lines()
-        found_lines = search_by_nickname(lines, text, mode)
-    except Exception as e:
-        logger.exception("Ошибка поиска")
-        await update.message.reply_text(
-            f"Ошибка:\n{e}",
-            reply_markup=get_main_keyboard(),
-        )
-        return
-
-    mode_name = "точный" if mode == SEARCH_MODE_EXACT else "частичный"
-
-    await send_results(
-        update,
-        title=f"Поиск по nickname: {text}\nРежим: {mode_name}\nНайдено строк: {len(found_lines)}",
-        lines=found_lines,
-    )
+    found = search(lines, text, mode)
+    await send(update, f"Поиск: {text}", found)
 
 
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("Произошла ошибка", exc_info=context.error)
-
-
-def main() -> None:
+def main():
     token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("Не найден BOT_TOKEN в переменных окружения Railway.")
-
-    ensure_data_file_exists()
-
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(on_error)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
-    logger.info("Бот запущен...")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling()
 
 
 if __name__ == "__main__":
