@@ -3,7 +3,7 @@ import os
 import random
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Set
 
 from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import (
@@ -14,10 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DATA_FILE = Path(__file__).with_name("userdata.txt")
@@ -29,12 +26,36 @@ user_modes: Dict[int, str] = {}
 user_site_filters: Dict[int, str] = {}
 waiting_for_site_input: Set[int] = set()
 
+# 🔥 список клиентов
+CLIENTS_TEXT = """celka.xyz
+nursultan.fun
+pulsevisuals.pro
+wexside.ru
+deltaclient.site
+arbuz.cc
+britva.ru
+dimasikclient.ru
+rockstar.pub
+rich-dlc.tech
+cortexclient.com
+neverlose.tech
+monotondlc.space
+quickclient.cc
+arcadeclient.xyz
+privatedlc.xyz
+alphadlc.ru
+grimclient.pl
+akrien.wtf
+newcode.cc
+energyclient.su
+catlavan.xyz
+mc.fringeworld.ru"""
+
 
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         [["Рандом", "По сайту"], ["Клиенты", "Настройки"]],
         resize_keyboard=True,
-        is_persistent=True,
     )
 
 
@@ -42,31 +63,21 @@ def get_settings_keyboard():
     return ReplyKeyboardMarkup(
         [["Точный поиск", "Частичный поиск"], ["Сбросить сайт", "Назад"]],
         resize_keyboard=True,
-        is_persistent=True,
     )
 
 
 def read_lines():
     if not DATA_FILE.exists():
         return []
-
     with DATA_FILE.open("r", encoding="utf-8", errors="ignore") as f:
         return [line.strip() for line in f if line.strip()]
 
 
-def normalize_site(raw_site: str):
-    s = raw_site.strip()
-
-    if s.startswith("https://"):
-        s = s[8:]
-    elif s.startswith("http://"):
-        s = s[7:]
-
-    for suffix in ("/register(login)", "/register", "/login"):
-        if s.endswith(suffix):
-            s = s[: -len(suffix)]
-            break
-
+def normalize_site(s: str):
+    s = s.replace("https://", "").replace("http://", "")
+    for x in ("/register(login)", "/register", "/login"):
+        if s.endswith(x):
+            s = s[: -len(x)]
     return s.strip("/")
 
 
@@ -74,8 +85,8 @@ def parse_line(line: str):
     parts = line.rsplit(":", 2)
 
     if len(parts) == 3:
-        raw_site, nick, other = parts
-        return normalize_site(raw_site), nick.strip(), other.strip()
+        site, nick, other = parts
+        return normalize_site(site), nick.strip(), other.strip()
 
     if len(parts) == 2:
         nick, other = parts
@@ -84,76 +95,50 @@ def parse_line(line: str):
     return "", "", ""
 
 
-def extract_nick(line: str):
-    _, nick, _ = parse_line(line)
-    return nick
+def extract_nick(line):
+    return parse_line(line)[1]
 
 
-def extract_site(line: str):
-    site, _, _ = parse_line(line)
-    return site
+def extract_site(line):
+    return parse_line(line)[0]
 
 
-def format_line(line: str):
+def format_line(line):
     site, nick, other = parse_line(line)
-
-    if site:
-        return f"{site}:{nick}:{other}"
-    return f"{nick}:{other}"
+    return f"{site}:{nick}:{other}" if site else f"{nick}:{other}"
 
 
-def get_all_nicks(lines):
-    return list({extract_nick(line) for line in lines if extract_nick(line)})
-
-
-def get_all_clients(lines):
-    clients = {extract_site(line) for line in lines if extract_site(line)}
-    return sorted(clients)
-
-
-def filter_lines_by_site(lines, site_filter: str):
+def filter_by_site(lines, site_filter):
     if not site_filter:
         return lines
-
-    s = site_filter.strip().lower()
-    result = []
-
-    for line in lines:
-        site = extract_site(line).lower()
-        if s in site:
-            result.append(line)
-
-    return result
+    s = site_filter.lower()
+    return [l for l in lines if s in extract_site(l).lower()]
 
 
-def search(lines, query, mode, site_filter=""):
-    filtered = filter_lines_by_site(lines, site_filter)
+def search(lines, query, mode, site_filter):
+    lines = filter_by_site(lines, site_filter)
     q = query.lower()
     result = []
 
-    for line in filtered:
-        nick = extract_nick(line).lower()
-
-        if mode == SEARCH_MODE_EXACT:
-            if nick == q:
-                result.append(format_line(line))
-        else:
-            if q in nick:
-                result.append(format_line(line))
+    for l in lines:
+        nick = extract_nick(l).lower()
+        if (mode == SEARCH_MODE_EXACT and nick == q) or (
+            mode == SEARCH_MODE_PARTIAL and q in nick
+        ):
+            result.append(format_line(l))
 
     return result
 
 
-def get_random(lines, site_filter=""):
-    filtered = filter_lines_by_site(lines, site_filter)
-    nicks = get_all_nicks(filtered)
+def get_random(lines, site_filter):
+    lines = filter_by_site(lines, site_filter)
+    nicks = list({extract_nick(l) for l in lines if extract_nick(l)})
 
     if not nicks:
         return None
 
     nick = random.choice(nicks)
-    found = [format_line(l) for l in filtered if extract_nick(l).lower() == nick.lower()]
-    return nick, found
+    return nick, [format_line(l) for l in lines if extract_nick(l) == nick]
 
 
 async def send(update, title, lines):
@@ -166,146 +151,94 @@ async def send(update, title, lines):
     if len(text) < 3500:
         await update.message.reply_text(text, reply_markup=get_main_keyboard())
     else:
-        bio = BytesIO("\n".join(lines).encode("utf-8"))
+        bio = BytesIO("\n".join(lines).encode())
         bio.name = "results.txt"
-        await update.message.reply_document(bio, caption=title, reply_markup=get_main_keyboard())
-
-
-async def send_clients(update, clients):
-    if not clients:
-        await update.message.reply_text("Клиенты не найдены.", reply_markup=get_main_keyboard())
-        return
-
-    text = "Список клиентов:\n\n" + "\n".join(clients)
-
-    if len(text) < 3500:
-        await update.message.reply_text(text, reply_markup=get_main_keyboard())
-    else:
-        bio = BytesIO("\n".join(clients).encode("utf-8"))
-        bio.name = "clients.txt"
-        await update.message.reply_document(
-            bio,
-            caption=f"Список клиентов: {len(clients)}",
-            reply_markup=get_main_keyboard(),
-        )
+        await update.message.reply_document(bio, caption=title)
 
 
 def get_mode(uid):
     return user_modes.get(uid, SEARCH_MODE_PARTIAL)
 
 
-def get_site_filter(uid):
+def get_site(uid):
     return user_site_filters.get(uid, "")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    mode_text = "Точный" if get_mode(uid) == SEARCH_MODE_EXACT else "Частичный"
-    site_filter = get_site_filter(uid) or "не выбран"
 
     await update.message.reply_text(
         "Бот запущен.\n\n"
-        "Отправь nickname для поиска.\n"
-        "Кнопка «Рандом» выбирает случайный nickname.\n"
-        "Кнопка «По сайту» задаёт фильтр сайта.\n"
-        "Кнопка «Клиенты» показывает список сайтов из базы.\n\n"
-        "Формат базы:\n"
-        "https://site/register(login):nickname:other\n"
-        "или\n"
-        "nickname:other\n\n"
-        f"Текущий режим: {mode_text}\n"
-        f"Текущий сайт: {site_filter}",
-        reply_markup=get_main_keyboard()
+        "Отправь nickname для поиска.\n\n"
+        "📌 Список сайтов:\n"
+        f"{CLIENTS_TEXT}\n",
+        reply_markup=get_main_keyboard(),
     )
 
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     uid = update.effective_user.id
-    mode = get_mode(uid)
-    site_filter = get_site_filter(uid)
 
     if uid in waiting_for_site_input:
         waiting_for_site_input.remove(uid)
-        normalized = normalize_site(text)
-        user_site_filters[uid] = normalized
+        user_site_filters[uid] = normalize_site(text)
+        await update.message.reply_text("Сайт установлен", reply_markup=get_main_keyboard())
+        return
+
+    if text == "Клиенты":
         await update.message.reply_text(
-            f"Фильтр сайта установлен: {normalized}",
+            "Список клиентов:\n\n" + CLIENTS_TEXT,
             reply_markup=get_main_keyboard(),
         )
         return
 
     if text == "По сайту":
-        await update.message.reply_text(
-            "Введи часть сайта, например:\ncelka",
-            reply_markup=get_main_keyboard(),
-        )
         waiting_for_site_input.add(uid)
-        return
-
-    if text == "Клиенты":
-        lines = read_lines()
-        clients = get_all_clients(lines)
-        await send_clients(update, clients)
+        await update.message.reply_text("Введи часть сайта (пример: celka)")
         return
 
     if text == "Настройки":
-        current_site = site_filter or "не выбран"
-        current_mode = "Точный поиск" if mode == SEARCH_MODE_EXACT else "Частичный поиск"
-        await update.message.reply_text(
-            f"Открыты настройки.\nТекущий режим: {current_mode}\nТекущий сайт: {current_site}",
-            reply_markup=get_settings_keyboard(),
-        )
+        await update.message.reply_text("Настройки", reply_markup=get_settings_keyboard())
         return
 
     if text == "Назад":
-        await update.message.reply_text("Возврат в меню.", reply_markup=get_main_keyboard())
+        await update.message.reply_text("Меню", reply_markup=get_main_keyboard())
         return
 
     if text == "Точный поиск":
         user_modes[uid] = SEARCH_MODE_EXACT
-        await update.message.reply_text("Режим поиска переключён: Точный поиск", reply_markup=get_settings_keyboard())
+        await update.message.reply_text("Ок")
         return
 
     if text == "Частичный поиск":
         user_modes[uid] = SEARCH_MODE_PARTIAL
-        await update.message.reply_text("Режим поиска переключён: Частичный поиск", reply_markup=get_settings_keyboard())
+        await update.message.reply_text("Ок")
         return
 
     if text == "Сбросить сайт":
         user_site_filters.pop(uid, None)
-        await update.message.reply_text("Фильтр сайта сброшен.", reply_markup=get_settings_keyboard())
+        await update.message.reply_text("Сайт сброшен")
         return
 
     lines = read_lines()
 
     if text == "Рандом":
-        res = get_random(lines, site_filter)
+        res = get_random(lines, get_site(uid))
         if not res:
-            await update.message.reply_text("База пуста.", reply_markup=get_main_keyboard())
+            await update.message.reply_text("База пуста")
             return
 
         nick, found = res
-        title = f"Рандом: {nick}"
-        if site_filter:
-            title += f"\nСайт: {site_filter}"
-
-        await send(update, title, found)
+        await send(update, f"Рандом: {nick}", found)
         return
 
-    found = search(lines, text, mode, site_filter)
-    title = f"Поиск: {text}"
-    if site_filter:
-        title += f"\nСайт: {site_filter}"
-
-    await send(update, title, found)
+    found = search(lines, text, get_mode(uid), get_site(uid))
+    await send(update, f"Поиск: {text}", found)
 
 
 def main():
     token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("Не найден BOT_TOKEN")
-
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
