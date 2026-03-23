@@ -26,19 +26,23 @@ SEARCH_MODE_EXACT = "exact"
 SEARCH_MODE_PARTIAL = "partial"
 
 user_modes: Dict[int, str] = {}
+user_site_filters: Dict[int, str] = {}
+waiting_for_site_input: Set[int] = set()
 
 
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
-        [["Рандом", "Настройки"]],
+        [["Рандом", "По сайту"], ["Настройки"]],
         resize_keyboard=True,
+        is_persistent=True,
     )
 
 
 def get_settings_keyboard():
     return ReplyKeyboardMarkup(
-        [["Точный поиск", "Частичный поиск"], ["Назад"]],
+        [["Точный поиск", "Частичный поиск"], ["Сбросить сайт", "Назад"]],
         resize_keyboard=True,
+        is_persistent=True,
     )
 
 
@@ -47,9 +51,7 @@ def read_lines():
         return []
 
     with DATA_FILE.open("r", encoding="utf-8", errors="ignore") as f:
-        lines = [line.strip() for line in f if line.strip()]
-
-    return lines
+        return [line.strip() for line in f if line.strip()]
 
 
 def normalize_site(raw_site: str):
@@ -87,6 +89,11 @@ def extract_nick(line: str):
     return nick
 
 
+def extract_site(line: str):
+    site, _, _ = parse_line(line)
+    return site
+
+
 def format_line(line: str):
     site, nick, other = parse_line(line)
 
@@ -99,11 +106,27 @@ def get_all_nicks(lines):
     return list({extract_nick(line) for line in lines if extract_nick(line)})
 
 
-def search(lines, query, mode):
-    q = query.lower()
+def filter_lines_by_site(lines, site_filter: str):
+    if not site_filter:
+        return lines
+
+    s = site_filter.strip().lower()
     result = []
 
     for line in lines:
+        site = extract_site(line).lower()
+        if s in site:
+            result.append(line)
+
+    return result
+
+
+def search(lines, query, mode, site_filter=""):
+    filtered = filter_lines_by_site(lines, site_filter)
+    q = query.lower()
+    result = []
+
+    for line in filtered:
         nick = extract_nick(line).lower()
 
         if mode == SEARCH_MODE_EXACT:
@@ -116,14 +139,15 @@ def search(lines, query, mode):
     return result
 
 
-def get_random(lines):
-    nicks = get_all_nicks(lines)
+def get_random(lines, site_filter=""):
+    filtered = filter_lines_by_site(lines, site_filter)
+    nicks = get_all_nicks(filtered)
+
     if not nicks:
         return None
 
     nick = random.choice(nicks)
-    found = [format_line(l) for l in lines if extract_nick(l) == nick]
-
+    found = [format_line(l) for l in filtered if extract_nick(l).lower() == nick.lower()]
     return nick, found
 
 
@@ -137,7 +161,7 @@ async def send(update, title, lines):
     if len(text) < 3500:
         await update.message.reply_text(text, reply_markup=get_main_keyboard())
     else:
-        bio = BytesIO("\n".join(lines).encode())
+        bio = BytesIO("\n".join(lines).encode("utf-8"))
         bio.name = "results.txt"
         await update.message.reply_document(bio, caption=title, reply_markup=get_main_keyboard())
 
@@ -146,18 +170,26 @@ def get_mode(uid):
     return user_modes.get(uid, SEARCH_MODE_PARTIAL)
 
 
+def get_site_filter(uid):
+    return user_site_filters.get(uid, "")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    mode_text = "Точный" if get_mode(uid) == SEARCH_MODE_EXACT else "Частичный"
+    site_filter = get_site_filter(uid) or "не выбран"
+
     await update.message.reply_text(
         "Бот запущен.\n\n"
-        "Отправь nickname для поиска.\n\n"
-        "📌 Список сайтов:\n"
-        "celka.xyz\nnursultan.fun\npulsevisuals.pro\nwexside.ru\n"
-        "deltaclient.site\narbuz.cc\nbritva.ru\ndimasikclient.ru\n"
-        "rockstar.pub\nrich-dlc.tech\ncortexclient.com\nneverlose.tech\n"
-        "monotondlc.space\nquickclient.cc\narcadeclient.xyz\nprivatedlc.xyz\n"
-        "alphadlc.ru\ngr﻿imclient.pl\nakrien.wtf\nnewcode.cc\nenergyclient.su\n"
-        "catlavan.xyz\nmc.fringeworld.ru\n\n"
-        f"Текущий режим: {'Точный' if get_mode(update.effective_user.id)==SEARCH_MODE_EXACT else 'Частичный'}",
+        "Отправь nickname для поиска.\n"
+        "Кнопка «Рандом» выбирает случайный nickname.\n"
+        "Кнопка «По сайту» задаёт фильтр сайта.\n\n"
+        "Формат базы:\n"
+        "https://site/register(login):nickname:other\n"
+        "или\n"
+        "nickname:other\n\n"
+        f"Текущий режим: {mode_text}\n"
+        f"Текущий сайт: {site_filter}",
         reply_markup=get_main_keyboard()
     )
 
@@ -166,43 +198,83 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     uid = update.effective_user.id
     mode = get_mode(uid)
+    site_filter = get_site_filter(uid)
+
+    if uid in waiting_for_site_input:
+        waiting_for_site_input.remove(uid)
+        normalized = normalize_site(text)
+        user_site_filters[uid] = normalized
+        await update.message.reply_text(
+            f"Фильтр сайта установлен: {normalized}",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    if text == "По сайту":
+        await update.message.reply_text(
+            "Введи сайт, например:\ncelka.xyz",
+            reply_markup=get_main_keyboard(),
+        )
+        waiting_for_site_input.add(uid)
+        return
 
     if text == "Настройки":
-        await update.message.reply_text("Настройки:", reply_markup=get_settings_keyboard())
+        current_site = site_filter or "не выбран"
+        current_mode = "Точный поиск" if mode == SEARCH_MODE_EXACT else "Частичный поиск"
+        await update.message.reply_text(
+            f"Открыты настройки.\nТекущий режим: {current_mode}\nТекущий сайт: {current_site}",
+            reply_markup=get_settings_keyboard(),
+        )
         return
 
     if text == "Назад":
-        await update.message.reply_text("Меню", reply_markup=get_main_keyboard())
+        await update.message.reply_text("Возврат в меню.", reply_markup=get_main_keyboard())
         return
 
     if text == "Точный поиск":
         user_modes[uid] = SEARCH_MODE_EXACT
-        await update.message.reply_text("Ок", reply_markup=get_settings_keyboard())
+        await update.message.reply_text("Режим поиска переключён: Точный поиск", reply_markup=get_settings_keyboard())
         return
 
     if text == "Частичный поиск":
         user_modes[uid] = SEARCH_MODE_PARTIAL
-        await update.message.reply_text("Ок", reply_markup=get_settings_keyboard())
+        await update.message.reply_text("Режим поиска переключён: Частичный поиск", reply_markup=get_settings_keyboard())
+        return
+
+    if text == "Сбросить сайт":
+        user_site_filters.pop(uid, None)
+        await update.message.reply_text("Фильтр сайта сброшен.", reply_markup=get_settings_keyboard())
         return
 
     lines = read_lines()
 
     if text == "Рандом":
-        res = get_random(lines)
+        res = get_random(lines, site_filter)
         if not res:
             await update.message.reply_text("База пуста.", reply_markup=get_main_keyboard())
             return
 
         nick, found = res
-        await send(update, f"Рандом: {nick}", found)
+        title = f"Рандом: {nick}"
+        if site_filter:
+            title += f"\nСайт: {site_filter}"
+
+        await send(update, title, found)
         return
 
-    found = search(lines, text, mode)
-    await send(update, f"Поиск: {text}", found)
+    found = search(lines, text, mode, site_filter)
+    title = f"Поиск: {text}"
+    if site_filter:
+        title += f"\nСайт: {site_filter}"
+
+    await send(update, title, found)
 
 
 def main():
     token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise RuntimeError("Не найден BOT_TOKEN")
+
     app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
