@@ -44,7 +44,7 @@ def read_lines() -> List[str]:
 
 
 def parse_line(line: str) -> Tuple[str, str, str]:
-    parts = line.split(":", 2)
+    parts = line.rsplit(":", 2)
     if len(parts) == 3:
         site, nick, rest = parts
         return site.strip(), nick.strip(), rest.strip()
